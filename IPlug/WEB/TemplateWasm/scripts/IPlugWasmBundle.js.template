@@ -298,11 +298,21 @@ window.Module = window.Module || {
           break;
 
         case 'SMMFD': // Send MIDI Message From Delegate
-          if (typeof msg.data === 'string') {
-            const parts = msg.data.split(':').map(Number);
-            this.emit('midiMsg', { status: parts[0], data1: parts[1], data2: parts[2] });
-            if (this.onMidiMsg) this.onMidiMsg(parts[0], parts[1], parts[2]);
-            if (this.uiModule?.SMMFD) this.uiModule.SMMFD(parts[0], parts[1], parts[2]);
+          {
+            let status, data1, data2;
+            if (typeof msg.data === 'string') {
+              // Legacy string format: "status:data1:data2"
+              const parts = msg.data.split(':').map(Number);
+              [status, data1, data2] = parts;
+            } else {
+              // New object format with separate fields
+              status = msg.status;
+              data1 = msg.data1;
+              data2 = msg.data2;
+            }
+            this.emit('midiMsg', { status, data1, data2 });
+            if (this.onMidiMsg) this.onMidiMsg(status, data1, data2);
+            if (this.uiModule?.SMMFD) this.uiModule.SMMFD(status, data1, data2);
           }
           break;
 

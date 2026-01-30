@@ -255,6 +255,21 @@ void IPlugWasmDSP::SendParameterValueFromDelegate(int paramIdx, double value, bo
   }, mInstanceId, paramIdx, value);
 }
 
+void IPlugWasmDSP::SendMidiMsgFromDelegate(const IMidiMsg& msg)
+{
+  EM_ASM({
+    var instances = Module._instancePorts;
+    if (instances && instances[$0]) {
+      instances[$0].postMessage({
+        verb: 'SMMFD',
+        status: $1,
+        data1: $2,
+        data2: $3
+      });
+    }
+  }, mInstanceId, msg.mStatus, msg.mData1, msg.mData2);
+}
+
 void IPlugWasmDSP::SendArbitraryMsgFromDelegate(int msgTag, int dataSize, const void* pData)
 {
   // Try SAB first for low-latency visualization data

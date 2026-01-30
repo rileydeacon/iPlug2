@@ -73,6 +73,7 @@ public:
   void SendControlMsgFromDelegate(int ctrlTag, int msgTag, int dataSize, const void* pData) override;
   void SendParameterValueFromDelegate(int paramIdx, double value, bool normalized) override;
   void SendArbitraryMsgFromDelegate(int msgTag, int dataSize = 0, const void* pData = nullptr) override;
+  void SendMidiMsgFromDelegate(const IMidiMsg& msg) override;
 
   /** Get the number of input channels */
   int GetNumInputChannels() const { return MaxNChannels(ERoute::kInput); }
