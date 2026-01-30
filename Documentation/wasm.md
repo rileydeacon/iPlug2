@@ -19,6 +19,7 @@ Communication between modules uses `postMessage` for parameters/MIDI and optiona
 - **Smaller initial load**: DSP module embedded as BASE64, UI loads asynchronously
 - **No WAM SDK dependency**: Uses standard Web Audio API directly
 - **Shadow DOM support**: UI encapsulated for embedding in web pages
+- **Multi-instance support**: Multiple plugin instances can run in the same AudioContext
 
 ## Prerequisites
 
@@ -227,6 +228,49 @@ HTTPServer(('localhost', port), CORPHandler).serve_forever()
 ```
 
 Save as `serve.py` and run: `python3 serve.py 8080`
+
+## Multi-Instance Support
+
+The WASM DSP module supports multiple plugin instances running in the same AudioWorklet context. This enables:
+
+- Multiple instances of the same plugin (e.g., two compressors in a chain)
+- Plugin chains where audio flows through multiple effects
+- Hosting multiple plugins in a single web page
+
+### How It Works
+
+Each `AudioWorkletProcessor` creates its own DSP instance:
+
+```javascript
+// In AudioWorkletProcessor constructor
+this.instanceId = Module.createInstance();  // Returns unique ID
+
+// All calls include instance ID
+Module.init(this.instanceId, sampleRate, blockSize);
+Module.processBlock(this.instanceId, inputPtrs, outputPtrs, nFrames);
+Module.onParam(this.instanceId, paramIdx, value);
+```
+
+The C++ side maintains an instance registry:
+- `createInstance()` - allocates new plugin, returns ID
+- `destroyInstance(id)` - cleans up instance
+- All other functions take `instanceId` as first parameter
+
+### Instance Lifecycle
+
+1. **Create**: Processor constructor calls `Module.createInstance()`
+2. **Register**: Processor registers its `port` for postMessage callbacks
+3. **Use**: All WASM calls include instance ID
+4. **Destroy**: On cleanup, call `Module.destroyInstance(instanceId)`
+
+### Memory Considerations
+
+Each instance has its own:
+- Plugin state and parameters
+- Audio buffers (allocated separately per processor)
+- Message port for DSP→UI communication
+
+The WASM module code is shared across all instances, but each instance has isolated state.
 
 ## Comparison with WAM Builds
 

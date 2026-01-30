@@ -37,6 +37,12 @@ public:
   IPlugWasmDSP(const InstanceInfo& info, const Config& config);
   virtual ~IPlugWasmDSP();
 
+  /** Set the instance ID (called after construction by createInstance binding) */
+  void SetInstanceId(int instanceId);
+
+  /** Get the instance ID */
+  int GetInstanceId() const { return mInstanceId; }
+
   /** Initialize the DSP processor
    * @param sampleRate The sample rate
    * @param blockSize The block size (typically 128 for Web Audio) */
@@ -76,6 +82,9 @@ public:
 
   /** Check if plugin is an instrument (synth) */
   bool IsPlugInstrument() const { return IsInstrument(); }
+
+private:
+  int mInstanceId = 0;
 };
 
 IPlugWasmDSP* MakePlug(const InstanceInfo& info);
