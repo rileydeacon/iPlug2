@@ -814,9 +814,264 @@ void IGraphicsWeb::CreatePlatformTextEntry(int paramIdx, const IText& text, cons
   emscripten_set_keydown_callback("textEntry", this, 1, text_entry_keydown);
 }
 
+// Global state for active popup menu (only one can be active at a time)
+static IGraphicsWeb* gActivePopupGraphics = nullptr;
+static IPopupMenu* gActivePopupMenu = nullptr;
+
+// Called from JavaScript when a menu item is selected
+extern "C" {
+EMSCRIPTEN_KEEPALIVE
+void iGraphicsPopupMenuCallback(int itemIdx)
+{
+  if (gActivePopupGraphics && gActivePopupMenu)
+  {
+    gActivePopupMenu->SetChosenItemIdx(itemIdx);
+    gActivePopupGraphics->SetControlValueAfterPopupMenu(gActivePopupMenu);
+  }
+  gActivePopupGraphics = nullptr;
+  gActivePopupMenu = nullptr;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void iGraphicsPopupMenuDismissed()
+{
+  if (gActivePopupGraphics)
+  {
+    gActivePopupGraphics->SetControlValueAfterPopupMenu(nullptr);
+  }
+  gActivePopupGraphics = nullptr;
+  gActivePopupMenu = nullptr;
+}
+} // extern "C"
+
+// Helper EM_JS to create and show the popover menu
+EM_JS(void, showPopoverMenu, (const char* menuJson, double x, double y, void* pRootNode, bool inShadowDOM), {
+  const menuData = JSON.parse(UTF8ToString(menuJson));
+  const rootNode = inShadowDOM ? Emval.toValue(pRootNode) : document;
+
+  // Remove any existing popover menu
+  const existing = rootNode.getElementById ? rootNode.getElementById('iplug-popup-menu') :
+                   rootNode.querySelector('#iplug-popup-menu');
+  if (existing) {
+    existing.remove();
+  }
+
+  // Create the popover container
+  const popover = document.createElement('div');
+  popover.id = 'iplug-popup-menu';
+  popover.setAttribute('popover', 'auto');
+  popover.setAttribute('role', 'menu');
+  popover.setAttribute('aria-label', menuData.title || 'Menu');
+
+  // Style the popover
+  // Note: inset:auto must come first to reset browser defaults before setting left/top
+  popover.style.cssText = `
+    position: fixed;
+    inset: auto;
+    left: ${x}px;
+    top: ${y}px;
+    margin: 0;
+    padding: 4px 0;
+    min-width: 150px;
+    max-width: 300px;
+    max-height: 400px;
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 13px;
+    z-index: 10000;
+  `;
+
+  // Build menu items
+  function createMenuItem(item, index) {
+    if (item.isSeparator) {
+      const sep = document.createElement('div');
+      sep.style.cssText = 'height: 1px; background: #e0e0e0; margin: 4px 8px;';
+      sep.setAttribute('role', 'separator');
+      return sep;
+    }
+
+    const btn = document.createElement('button');
+    btn.setAttribute('role', 'menuitem');
+    btn.style.cssText = `
+      display: flex;
+      align-items: center;
+      width: 100%;
+      padding: 6px 12px;
+      border: none;
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+      color: ${item.enabled ? '#333' : '#999'};
+      font-size: 13px;
+      font-family: inherit;
+    `;
+
+    if (item.isTitle) {
+      btn.style.fontWeight = 'bold';
+      btn.style.cursor = 'default';
+      btn.style.color = '#666';
+    }
+
+    // Checkmark
+    const check = document.createElement('span');
+    check.style.cssText = 'width: 16px; margin-right: 4px; text-align: center;';
+    check.textContent = item.checked ? '✓' : '';
+    btn.appendChild(check);
+
+    // Label
+    const label = document.createElement('span');
+    label.style.cssText = 'flex: 1;';
+    label.textContent = item.text;
+    btn.appendChild(label);
+
+    // Submenu arrow (if has submenu)
+    if (item.hasSubmenu) {
+      const arrow = document.createElement('span');
+      arrow.style.cssText = 'margin-left: 8px; color: #999;';
+      arrow.textContent = '▶';
+      btn.appendChild(arrow);
+    }
+
+    // Hover effect
+    btn.addEventListener('mouseenter', () => {
+      if (item.enabled && !item.isTitle) {
+        btn.style.background = '#0066cc';
+        btn.style.color = '#fff';
+        check.style.color = '#fff';
+      }
+    });
+    btn.addEventListener('mouseleave', () => {
+      btn.style.background = 'transparent';
+      btn.style.color = item.enabled ? '#333' : '#999';
+      check.style.color = 'inherit';
+    });
+
+    // Disable non-clickable items
+    if (!item.enabled || item.isTitle || item.hasSubmenu) {
+      btn.disabled = true;
+      btn.style.cursor = item.isTitle ? 'default' : 'not-allowed';
+    }
+
+    return btn;
+  }
+
+  // Track whether an item was selected (to avoid calling dismiss callback)
+  let itemSelected = false;
+
+  // Add items
+  menuData.items.forEach((item, index) => {
+    popover.appendChild(createMenuItem(item, index));
+  });
+
+  // Handle dismiss (clicking outside or pressing Escape)
+  popover.addEventListener('toggle', (e) => {
+    if (e.newState === 'closed') {
+      popover.remove();
+      // Only notify dismissal if no item was selected
+      if (!itemSelected) {
+        Module._iGraphicsPopupMenuDismissed();
+      }
+    } else if (e.newState === 'open') {
+      // Focus first item for accessibility
+      const firstItem = popover.querySelector('button:not([disabled])');
+      if (firstItem) firstItem.focus();
+    }
+  });
+
+  // Override click handler to set itemSelected flag
+  popover.addEventListener('click', (e) => {
+    const btn = e.target.closest('button:not([disabled])');
+    if (btn) {
+      const index = Array.from(popover.querySelectorAll('button')).indexOf(btn);
+      if (index >= 0) {
+        itemSelected = true;
+        popover.hidePopover();
+        Module._iGraphicsPopupMenuCallback(index);
+        e.stopPropagation();
+      }
+    }
+  });
+
+  // Append to the appropriate root (shadow root or document body)
+  if (inShadowDOM) {
+    rootNode.appendChild(popover);
+  } else {
+    document.body.appendChild(popover);
+  }
+
+  // Show the popover after the current frame to prevent the opening click from
+  // immediately triggering light-dismiss
+  requestAnimationFrame(() => {
+    try {
+      popover.showPopover();
+    } catch (e) {
+      // Fallback for browsers without popover support
+      popover.style.display = 'block';
+      // Manual light-dismiss
+      const dismissHandler = (event) => {
+        if (!popover.contains(event.target)) {
+          popover.remove();
+          document.removeEventListener('mousedown', dismissHandler);
+          Module._iGraphicsPopupMenuDismissed();
+        }
+      };
+      requestAnimationFrame(() => document.addEventListener('mousedown', dismissHandler));
+    }
+  });
+});
+
 IPopupMenu* IGraphicsWeb::CreatePlatformPopupMenu(IPopupMenu& menu, const IRECT bounds, bool& isAsync)
 {
-  return nullptr;
+  isAsync = true; // Popover interaction is asynchronous
+
+  // Store the active popup state for callbacks
+  gActivePopupGraphics = this;
+  gActivePopupMenu = &menu;
+
+  // Build JSON representation of the menu
+  std::string json = "{";
+  json += "\"title\":\"" + std::string(menu.GetRootTitle()) + "\",";
+  json += "\"items\":[";
+
+  for (int i = 0; i < menu.NItems(); i++)
+  {
+    IPopupMenu::Item* pItem = menu.GetItem(i);
+    if (i > 0) json += ",";
+
+    json += "{";
+    json += "\"text\":\"";
+    // Escape special characters in text
+    const char* text = pItem->GetText();
+    while (*text)
+    {
+      if (*text == '"' || *text == '\\')
+        json += '\\';
+      json += *text++;
+    }
+    json += "\",";
+    json += "\"enabled\":" + std::string(pItem->GetEnabled() ? "true" : "false") + ",";
+    json += "\"checked\":" + std::string(pItem->GetChecked() ? "true" : "false") + ",";
+    json += "\"isTitle\":" + std::string(pItem->GetIsTitle() ? "true" : "false") + ",";
+    json += "\"isSeparator\":" + std::string(pItem->GetIsSeparator() ? "true" : "false") + ",";
+    json += "\"hasSubmenu\":" + std::string(pItem->GetSubmenu() != nullptr ? "true" : "false");
+    json += "}";
+  }
+
+  json += "]}";
+
+  // Calculate position in screen coordinates
+  val rect = mCanvas.call<val>("getBoundingClientRect");
+  double x = rect["left"].as<double>() + bounds.L * GetDrawScale();
+  double y = rect["top"].as<double>() + bounds.B * GetDrawScale(); // Below the bounds
+
+  // Pass the root node handle for Shadow DOM support
+  showPopoverMenu(json.c_str(), x, y, mRootNode.as_handle(), mInShadowDOM);
+
+  return nullptr; // Async - result comes via callback
 }
 
 bool IGraphicsWeb::OpenURL(const char* url, const char* msgWindowTitle, const char* confirmMsg, const char* errMsgOnFailure)
