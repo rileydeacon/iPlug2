@@ -818,15 +818,48 @@ void IGraphicsWeb::CreatePlatformTextEntry(int paramIdx, const IText& text, cons
 static IGraphicsWeb* gActivePopupGraphics = nullptr;
 static IPopupMenu* gActivePopupMenu = nullptr;
 
+// Recursively find which menu contains the flat index (depth-first order)
+static IPopupMenu* GetItemMenu(int idx, int& idxInMenu, int& offsetIdx, IPopupMenu& menu)
+{
+  for (int i = 0; i < menu.NItems(); i++)
+  {
+    if (idx == offsetIdx)
+    {
+      idxInMenu = i;
+      return &menu;
+    }
+    offsetIdx++;
+
+    if (IPopupMenu* pSubmenu = menu.GetItem(i)->GetSubmenu())
+    {
+      IPopupMenu* pFound = GetItemMenu(idx, idxInMenu, offsetIdx, *pSubmenu);
+      if (pFound)
+        return pFound;
+    }
+  }
+  return nullptr;
+}
+
 // Called from JavaScript when a menu item is selected
 extern "C" {
 EMSCRIPTEN_KEEPALIVE
-void iGraphicsPopupMenuCallback(int itemIdx)
+void iGraphicsPopupMenuCallback(int flatIdx)
 {
+  DBGMSG("iGraphicsPopupMenuCallback called with flatIdx=%d\n", flatIdx);
   if (gActivePopupGraphics && gActivePopupMenu)
   {
-    gActivePopupMenu->SetChosenItemIdx(itemIdx);
-    gActivePopupGraphics->SetControlValueAfterPopupMenu(gActivePopupMenu);
+    int idxInMenu = 0, offsetIdx = 0;
+    IPopupMenu* pTargetMenu = GetItemMenu(flatIdx, idxInMenu, offsetIdx, *gActivePopupMenu);
+    DBGMSG("GetItemMenu returned: pTargetMenu=%p, idxInMenu=%d\n", pTargetMenu, idxInMenu);
+    if (pTargetMenu)
+    {
+      pTargetMenu->SetChosenItemIdx(idxInMenu);
+      gActivePopupGraphics->SetControlValueAfterPopupMenu(pTargetMenu);
+    }
+  }
+  else
+  {
+    DBGMSG("No active popup: gActivePopupGraphics=%p, gActivePopupMenu=%p\n", gActivePopupGraphics, gActivePopupMenu);
   }
   gActivePopupGraphics = nullptr;
   gActivePopupMenu = nullptr;
@@ -844,10 +877,16 @@ void iGraphicsPopupMenuDismissed()
 }
 } // extern "C"
 
-// Helper EM_JS to create and show the popover menu
+// Helper EM_JS to create and show the popover menu with submenu support
 EM_JS(void, showPopoverMenu, (const char* menuJson, double x, double y, void* pRootNode, bool inShadowDOM), {
   const menuData = JSON.parse(UTF8ToString(menuJson));
+  console.log('Menu data:', JSON.stringify(menuData, null, 2));
   const rootNode = inShadowDOM ? Emval.toValue(pRootNode) : document;
+  const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+  // Track all open submenus for cleanup
+  const openSubmenus = [];
+  let itemSelected = false;
 
   // Remove any existing popover menu
   const existing = rootNode.getElementById ? rootNode.getElementById('iplug-popup-menu') :
@@ -856,37 +895,58 @@ EM_JS(void, showPopoverMenu, (const char* menuJson, double x, double y, void* pR
     existing.remove();
   }
 
-  // Create the popover container
-  const popover = document.createElement('div');
-  popover.id = 'iplug-popup-menu';
-  popover.setAttribute('popover', 'auto');
-  popover.setAttribute('role', 'menu');
-  popover.setAttribute('aria-label', menuData.title || 'Menu');
+  // Close all submenus at and below a given depth
+  function closeSubmenusFromDepth(depth) {
+    while (openSubmenus.length > depth) {
+      const sub = openSubmenus.pop();
+      if (sub && sub.parentNode) {
+        try { sub.hidePopover(); } catch(e) {}
+        sub.remove();
+      }
+    }
+  }
 
-  // Style the popover
-  // Note: inset:auto must come first to reset browser defaults before setting left/top
-  popover.style.cssText = `
-    position: fixed;
-    inset: auto;
-    left: ${x}px;
-    top: ${y}px;
-    margin: 0;
-    padding: 4px 0;
-    min-width: 150px;
-    max-width: 300px;
-    max-height: 400px;
-    overflow-y: auto;
-    background: #fff;
-    border: 1px solid #ccc;
-    border-radius: 6px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    font-size: 13px;
-    z-index: 10000;
-  `;
+  // Create a menu popover (root or submenu) - all use 'manual' for consistent behavior
+  function createMenuPopover(items, posX, posY, depth, isSubmenu) {
+    const popover = document.createElement('div');
+    popover.className = 'iplug-popup-menu';
+    if (!isSubmenu) popover.id = 'iplug-popup-menu';
+    popover.setAttribute('popover', 'manual');
+    popover.setAttribute('role', 'menu');
+    popover.dataset.depth = depth;
 
-  // Build menu items
-  function createMenuItem(item, index) {
+    // Style the popover
+    popover.style.cssText = `
+      position: fixed;
+      inset: auto;
+      left: ${posX}px;
+      top: ${posY}px;
+      margin: 0;
+      padding: 4px 0;
+      min-width: 150px;
+      max-width: 300px;
+      max-height: 400px;
+      overflow-y: auto;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 13px;
+      z-index: ${10000 + depth};
+    `;
+
+    // Build menu items
+    items.forEach((item) => {
+      const el = createMenuItem(item, depth, popover);
+      popover.appendChild(el);
+    });
+
+    return popover;
+  }
+
+  // Create a single menu item
+  function createMenuItem(item, depth, parentPopover) {
     if (item.isSeparator) {
       const sep = document.createElement('div');
       sep.style.cssText = 'height: 1px; background: #e0e0e0; margin: 4px 8px;';
@@ -896,6 +956,7 @@ EM_JS(void, showPopoverMenu, (const char* menuJson, double x, double y, void* pR
 
     const btn = document.createElement('button');
     btn.setAttribute('role', 'menuitem');
+    btn.dataset.flatIdx = item.flatIdx;
     btn.style.cssText = `
       display: flex;
       align-items: center;
@@ -908,6 +969,7 @@ EM_JS(void, showPopoverMenu, (const char* menuJson, double x, double y, void* pR
       color: ${item.enabled ? '#333' : '#999'};
       font-size: 13px;
       font-family: inherit;
+      outline: none;
     `;
 
     if (item.isTitle) {
@@ -919,7 +981,7 @@ EM_JS(void, showPopoverMenu, (const char* menuJson, double x, double y, void* pR
     // Checkmark
     const check = document.createElement('span');
     check.style.cssText = 'width: 16px; margin-right: 4px; text-align: center;';
-    check.textContent = item.checked ? '✓' : '';
+    check.textContent = item.checked ? '\u2713' : '';
     btn.appendChild(check);
 
     // Label
@@ -928,30 +990,98 @@ EM_JS(void, showPopoverMenu, (const char* menuJson, double x, double y, void* pR
     label.textContent = item.text;
     btn.appendChild(label);
 
-    // Submenu arrow (if has submenu)
-    if (item.hasSubmenu) {
+    // Submenu arrow
+    if (item.submenu) {
       const arrow = document.createElement('span');
       arrow.style.cssText = 'margin-left: 8px; color: #999;';
-      arrow.textContent = '▶';
+      arrow.textContent = '\u25B6';
       btn.appendChild(arrow);
     }
 
-    // Hover effect
+    let hoverTimeout = null;
+    let leaveTimeout = null;
+
+    // Hover handlers for submenu
     btn.addEventListener('mouseenter', () => {
+      // Clear any pending leave timeout
+      if (leaveTimeout) {
+        clearTimeout(leaveTimeout);
+        leaveTimeout = null;
+      }
+
+      // Highlight
       if (item.enabled && !item.isTitle) {
         btn.style.background = '#0066cc';
         btn.style.color = '#fff';
         check.style.color = '#fff';
       }
+
+      // Close sibling submenus at this depth
+      closeSubmenusFromDepth(depth + 1);
+
+      // Open submenu after delay
+      if (item.submenu && item.enabled && !isTouchDevice) {
+        hoverTimeout = setTimeout(() => {
+          openSubmenu(item, btn, depth + 1);
+        }, 150);
+      }
     });
+
     btn.addEventListener('mouseleave', () => {
+      // Reset highlight
       btn.style.background = 'transparent';
       btn.style.color = item.enabled ? '#333' : '#999';
       check.style.color = 'inherit';
+
+      // Cancel pending submenu open
+      if (hoverTimeout) {
+        clearTimeout(hoverTimeout);
+        hoverTimeout = null;
+      }
     });
 
-    // Disable non-clickable items
-    if (!item.enabled || item.isTitle || item.hasSubmenu) {
+    // Click handler
+    btn.addEventListener('click', (e) => {
+      console.log('Menu item clicked:', item.text, 'flatIdx:', item.flatIdx, 'enabled:', item.enabled);
+      e.stopPropagation();
+      if (item.isTitle || !item.enabled) {
+        console.log('Item disabled or is title, ignoring');
+        return;
+      }
+
+      if (item.submenu) {
+        console.log('Item has submenu');
+        // On touch devices, first tap opens submenu
+        if (isTouchDevice) {
+          // Check if submenu is already open
+          const existingSubmenu = openSubmenus[depth];
+          if (!existingSubmenu) {
+            openSubmenu(item, btn, depth + 1);
+          }
+        }
+        return;
+      }
+
+      // Select this item
+      itemSelected = true;
+      const flatIdx = parseInt(btn.dataset.flatIdx, 10);
+      console.log('Calling callback with flatIdx:', flatIdx);
+
+      // Close all menus
+      closeSubmenusFromDepth(0);
+      const rootPopover = rootNode.getElementById ? rootNode.getElementById('iplug-popup-menu') :
+                          rootNode.querySelector('#iplug-popup-menu');
+      if (rootPopover) {
+        try { rootPopover.hidePopover(); } catch(e) {}
+        rootPopover.remove();
+      }
+
+      Module._iGraphicsPopupMenuCallback(flatIdx);
+      console.log('Callback completed');
+    });
+
+    // Disable non-selectable items (but not submenus)
+    if (!item.enabled || item.isTitle) {
       btn.disabled = true;
       btn.style.cursor = item.isTitle ? 'default' : 'not-allowed';
     }
@@ -959,70 +1089,173 @@ EM_JS(void, showPopoverMenu, (const char* menuJson, double x, double y, void* pR
     return btn;
   }
 
-  // Track whether an item was selected (to avoid calling dismiss callback)
-  let itemSelected = false;
+  // Open a submenu
+  function openSubmenu(item, parentBtn, depth) {
+    // Calculate position relative to parent button
+    const rect = parentBtn.getBoundingClientRect();
+    let subX = rect.right + 2;
+    let subY = rect.top;
 
-  // Add items
-  menuData.items.forEach((item, index) => {
-    popover.appendChild(createMenuItem(item, index));
-  });
+    // Flip to left if near right edge
+    if (subX + 150 > window.innerWidth) {
+      subX = rect.left - 152;
+    }
 
-  // Handle dismiss (clicking outside or pressing Escape)
-  popover.addEventListener('toggle', (e) => {
-    if (e.newState === 'closed') {
-      popover.remove();
-      // Only notify dismissal if no item was selected
+    // Flip upward if near bottom
+    const estimatedHeight = item.submenu.items.length * 30 + 8;
+    if (subY + estimatedHeight > window.innerHeight) {
+      subY = Math.max(0, window.innerHeight - estimatedHeight - 10);
+    }
+
+    const submenuPopover = createMenuPopover(item.submenu.items, subX, subY, depth, true);
+
+    // Track this submenu
+    openSubmenus[depth] = submenuPopover;
+
+    // Handle mouse leaving submenu (with tolerance for moving back to parent)
+    submenuPopover.addEventListener('mouseleave', () => {
+      setTimeout(() => {
+        // Check if mouse moved back to parent item or another item
+        const hovered = document.elementFromPoint(lastMouseX, lastMouseY);
+        const isInMenu = hovered && (
+          hovered.closest('.iplug-popup-menu') ||
+          hovered.classList.contains('iplug-popup-menu')
+        );
+        if (!isInMenu) {
+          closeSubmenusFromDepth(depth);
+        }
+      }, 100);
+    });
+
+    // Append and show
+    if (inShadowDOM) {
+      rootNode.appendChild(submenuPopover);
+    } else {
+      document.body.appendChild(submenuPopover);
+    }
+
+    try {
+      submenuPopover.showPopover();
+    } catch(e) {
+      submenuPopover.style.display = 'block';
+    }
+  }
+
+  // Track mouse position for leave tolerance
+  let lastMouseX = 0, lastMouseY = 0;
+  const mouseMoveHandler = (e) => {
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+  };
+  document.addEventListener('mousemove', mouseMoveHandler);
+
+  // Create root popover
+  const rootPopover = createMenuPopover(menuData.items, x, y, 0, false);
+  rootPopover.id = 'iplug-popup-menu';
+  rootPopover.setAttribute('aria-label', menuData.title || 'Menu');
+
+  // Cleanup function
+  function cleanup() {
+    closeSubmenusFromDepth(0);
+    document.removeEventListener('mousemove', mouseMoveHandler);
+    document.removeEventListener('mousedown', dismissHandler);
+    document.removeEventListener('keydown', escapeHandler);
+    try { rootPopover.hidePopover(); } catch(e) {}
+    rootPopover.remove();
+  }
+
+  // Manual light-dismiss: close on mousedown outside menu (not mouseup)
+  function dismissHandler(event) {
+    const isInMenu = event.target.closest('.iplug-popup-menu');
+    if (!isInMenu) {
+      cleanup();
       if (!itemSelected) {
         Module._iGraphicsPopupMenuDismissed();
       }
-    } else if (e.newState === 'open') {
-      // Focus first item for accessibility
-      const firstItem = popover.querySelector('button:not([disabled])');
-      if (firstItem) firstItem.focus();
     }
-  });
-
-  // Override click handler to set itemSelected flag
-  popover.addEventListener('click', (e) => {
-    const btn = e.target.closest('button:not([disabled])');
-    if (btn) {
-      const index = Array.from(popover.querySelectorAll('button')).indexOf(btn);
-      if (index >= 0) {
-        itemSelected = true;
-        popover.hidePopover();
-        Module._iGraphicsPopupMenuCallback(index);
-        e.stopPropagation();
-      }
-    }
-  });
-
-  // Append to the appropriate root (shadow root or document body)
-  if (inShadowDOM) {
-    rootNode.appendChild(popover);
-  } else {
-    document.body.appendChild(popover);
   }
 
-  // Show the popover after the current frame to prevent the opening click from
-  // immediately triggering light-dismiss
+  // Escape key handler
+  function escapeHandler(event) {
+    if (event.key === 'Escape') {
+      cleanup();
+      if (!itemSelected) {
+        Module._iGraphicsPopupMenuDismissed();
+      }
+    }
+  }
+
+  // Append root popover
+  if (inShadowDOM) {
+    rootNode.appendChild(rootPopover);
+  } else {
+    document.body.appendChild(rootPopover);
+  }
+
+  // Show popover and set up light-dismiss after a frame (to ignore the opening click)
   requestAnimationFrame(() => {
     try {
-      popover.showPopover();
+      rootPopover.showPopover();
     } catch (e) {
-      // Fallback for browsers without popover support
-      popover.style.display = 'block';
-      // Manual light-dismiss
-      const dismissHandler = (event) => {
-        if (!popover.contains(event.target)) {
-          popover.remove();
-          document.removeEventListener('mousedown', dismissHandler);
-          Module._iGraphicsPopupMenuDismissed();
-        }
-      };
-      requestAnimationFrame(() => document.addEventListener('mousedown', dismissHandler));
+      rootPopover.style.display = 'block';
     }
+    // Focus first item
+    const firstItem = rootPopover.querySelector('button:not([disabled])');
+    if (firstItem) firstItem.focus();
+
+    // Delay adding dismiss handler to ignore the mousedown that opened the menu
+    requestAnimationFrame(() => {
+      document.addEventListener('mousedown', dismissHandler);
+      document.addEventListener('keydown', escapeHandler);
+    });
   });
 });
+
+// Helper to escape JSON string
+static void EscapeJSONString(std::string& json, const char* text)
+{
+  while (*text)
+  {
+    if (*text == '"' || *text == '\\')
+      json += '\\';
+    json += *text++;
+  }
+}
+
+// Recursively serialize menu to JSON with flat indices
+static void SerializeMenuToJSON(std::string& json, IPopupMenu& menu, int& flatIdx)
+{
+  json += "{\"title\":\"";
+  EscapeJSONString(json, menu.GetRootTitle());
+  json += "\",\"items\":[";
+
+  for (int i = 0; i < menu.NItems(); i++)
+  {
+    IPopupMenu::Item* pItem = menu.GetItem(i);
+    if (i > 0) json += ",";
+
+    int thisIdx = flatIdx++;
+
+    json += "{\"flatIdx\":" + std::to_string(thisIdx) + ",";
+    json += "\"text\":\"";
+    EscapeJSONString(json, pItem->GetText());
+    json += "\",";
+    json += "\"enabled\":" + std::string(pItem->GetEnabled() ? "true" : "false") + ",";
+    json += "\"checked\":" + std::string(pItem->GetChecked() ? "true" : "false") + ",";
+    json += "\"isTitle\":" + std::string(pItem->GetIsTitle() ? "true" : "false") + ",";
+    json += "\"isSeparator\":" + std::string(pItem->GetIsSeparator() ? "true" : "false");
+
+    if (IPopupMenu* pSubmenu = pItem->GetSubmenu())
+    {
+      json += ",\"submenu\":";
+      SerializeMenuToJSON(json, *pSubmenu, flatIdx);
+    }
+
+    json += "}";
+  }
+
+  json += "]}";
+}
 
 IPopupMenu* IGraphicsWeb::CreatePlatformPopupMenu(IPopupMenu& menu, const IRECT bounds, bool& isAsync)
 {
@@ -1032,36 +1265,10 @@ IPopupMenu* IGraphicsWeb::CreatePlatformPopupMenu(IPopupMenu& menu, const IRECT 
   gActivePopupGraphics = this;
   gActivePopupMenu = &menu;
 
-  // Build JSON representation of the menu
-  std::string json = "{";
-  json += "\"title\":\"" + std::string(menu.GetRootTitle()) + "\",";
-  json += "\"items\":[";
-
-  for (int i = 0; i < menu.NItems(); i++)
-  {
-    IPopupMenu::Item* pItem = menu.GetItem(i);
-    if (i > 0) json += ",";
-
-    json += "{";
-    json += "\"text\":\"";
-    // Escape special characters in text
-    const char* text = pItem->GetText();
-    while (*text)
-    {
-      if (*text == '"' || *text == '\\')
-        json += '\\';
-      json += *text++;
-    }
-    json += "\",";
-    json += "\"enabled\":" + std::string(pItem->GetEnabled() ? "true" : "false") + ",";
-    json += "\"checked\":" + std::string(pItem->GetChecked() ? "true" : "false") + ",";
-    json += "\"isTitle\":" + std::string(pItem->GetIsTitle() ? "true" : "false") + ",";
-    json += "\"isSeparator\":" + std::string(pItem->GetIsSeparator() ? "true" : "false") + ",";
-    json += "\"hasSubmenu\":" + std::string(pItem->GetSubmenu() != nullptr ? "true" : "false");
-    json += "}";
-  }
-
-  json += "]}";
+  // Build JSON representation of the menu with flat indices
+  std::string json;
+  int flatIdx = 0;
+  SerializeMenuToJSON(json, menu, flatIdx);
 
   // Calculate position in screen coordinates
   val rect = mCanvas.call<val>("getBoundingClientRect");
