@@ -33,6 +33,8 @@
 // Curio Machines SVG / Bitmap UI Assets
 #define BACKGROUND_FN "bg.png"
 #define TAPE_KNOB_FN "tape-knob.svg"
+// Kept for Windows resource script compatibility.
+#define OUTPUT_KNOB_FN "output-knob.svg"
 
 #define AUV2_ENTRY tape_Entry
 #define AUV2_ENTRY_STR "tape_Entry"
