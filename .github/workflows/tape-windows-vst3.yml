@@ -1,0 +1,85 @@
+name: tape Windows VST3
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Build configuration
+        required: true
+        default: Release
+        type: choice
+        options:
+          - Release
+          - Debug
+
+jobs:
+  build-vst3:
+    name: Build tape VST3 (Windows x64)
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache iPlug SDKs and Win libs
+        uses: actions/cache@v4
+        with:
+          path: |
+            Dependencies/Build/win
+            Dependencies/IPlug/VST3_SDK
+            Dependencies/IPlug/CLAP_SDK
+            Dependencies/IPlug/CLAP_HELPERS
+            Dependencies/IPlug/WAM_SDK
+            Dependencies/IPlug/WAM_AWP
+          key: tape-win-vst3-${{ runner.os }}-${{ hashFiles('Dependencies/download-prebuilt-libs.sh', 'Dependencies/IPlug/download-iplug-sdks.sh') }}
+
+      - name: Download prebuilt Windows libs
+        shell: bash
+        run: |
+          cd Dependencies
+          bash ./download-prebuilt-libs.sh win
+
+      - name: Download public iPlug SDKs
+        shell: bash
+        run: |
+          cd Dependencies/IPlug
+          bash ./download-iplug-sdks.sh
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build tape-vst3
+        shell: pwsh
+        run: |
+          msbuild Projects/tape/tape.sln `
+            /m `
+            /t:tape-vst3 `
+            /p:Configuration=${{ inputs.configuration }} `
+            /p:Platform=x64
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $artifactDir = "artifacts"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+
+          $vst3Bundle = "Projects/tape/build-win/tape.vst3"
+          if (!(Test-Path $vst3Bundle)) {
+            Write-Error "Expected VST3 bundle not found at $vst3Bundle"
+          }
+
+          Copy-Item -Path $vst3Bundle -Destination $artifactDir -Recurse -Force
+
+          $pdb = "Projects/tape/build-win/pdbs/tape-vst3_x64.pdb"
+          if (Test-Path $pdb) {
+            Copy-Item -Path $pdb -Destination $artifactDir -Force
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tape-vst3-windows-${{ inputs.configuration }}
+          path: artifacts
+          if-no-files-found: error
