@@ -50,14 +50,24 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Verify solution path
+        shell: pwsh
+        run: |
+          $sln = Join-Path $env:GITHUB_WORKSPACE "Projects\tape\tape.sln"
+          Write-Host "GITHUB_WORKSPACE: $env:GITHUB_WORKSPACE"
+          Write-Host "Expected solution: $sln"
+          if (!(Test-Path $sln)) {
+            Write-Host "Workspace root contents:"
+            Get-ChildItem -Path $env:GITHUB_WORKSPACE
+            throw "Solution file not found at $sln"
+          }
+
       - name: Build tape-vst3
         shell: pwsh
         run: |
-          msbuild Projects/tape/tape.sln `
-            /m `
-            /t:tape-vst3 `
-            /p:Configuration=${{ inputs.configuration }} `
-            /p:Platform=x64
+          $sln = Join-Path $env:GITHUB_WORKSPACE "Projects\tape\tape.sln"
+          $cfg = "${{ inputs.configuration }}"
+          msbuild $sln /m /t:tape-vst3 "/p:Configuration=$cfg" /p:Platform=x64 /v:minimal
 
       - name: Collect artifacts
         shell: pwsh
@@ -67,7 +77,11 @@ jobs:
 
           $vst3Bundle = "Projects/tape/build-win/tape.vst3"
           if (!(Test-Path $vst3Bundle)) {
-            Write-Error "Expected VST3 bundle not found at $vst3Bundle"
+            $found = Get-ChildItem -Path "Projects/tape" -Recurse -Directory -Filter "tape.vst3" | Select-Object -First 1
+            if ($null -eq $found) {
+              Write-Error "Expected VST3 bundle not found. Checked $vst3Bundle"
+            }
+            $vst3Bundle = $found.FullName
           }
 
           Copy-Item -Path $vst3Bundle -Destination $artifactDir -Recurse -Force
